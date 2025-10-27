@@ -1,0 +1,8 @@
+{
+  "id": "weonar-player",
+  "name": "Weonar Player",
+  "version": "1.0.0",
+  "description": "Позволяет выбрать внешний плеер (включая GitHub-плеер Weonar)",
+  "author": "weonar",
+  "url": "https://weonar.github.io/weonar-plugin.github.io/weonar-player.js"
+}
