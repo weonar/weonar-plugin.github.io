@@ -1,0 +1,221 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VIDAA 4K HTML5/HLS Player</title>
+  <style>
+    html, body { margin:0; padding:0; background:#000; color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; height:100%; }
+    #app { display:flex; flex-direction:column; height:100%; }
+    header { padding:10px 12px; background:#111; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    header input[type="text"]{ flex:1; min-width:280px; border:1px solid #333; background:#0a0a0a; color:#ddd; padding:8px 10px; border-radius:6px; }
+    header button { border:0; padding:10px 14px; border-radius:6px; background:#2f7cff; color:#fff; font-weight:600; cursor:pointer; }
+    header button.secondary { background:#262626; }
+    header select { background:#0a0a0a; color:#ddd; border:1px solid #333; border-radius:6px; padding:8px; }
+    main { position:relative; flex:1; display:flex; align-items:center; justify-content:center; }
+    video { width:100%; height:100%; background:#000; }
+    .overlay { position:absolute; top:12px; right:12px; display:flex; gap:8px; }
+    .pill { background:#111; border:1px solid #333; border-radius:999px; padding:6px 10px; font-size:12px; color:#ddd; }
+    footer { padding:8px 12px; font-size:12px; color:#aaa; background:#0a0a0a; border-top:1px solid #111; display:flex; gap:12px; flex-wrap:wrap; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .hidden{ display:none; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <input id="src" type="text" placeholder="Paste HLS/DASH/MP4 URL (e.g. https://example.com/master.m3u8)" />
+    <button id="play">Play</button>
+    <button id="stop" class="secondary">Stop</button>
+    <select id="quality"></select>
+    <select id="audio"></select>
+    <select id="subs"></select>
+  </header>
+  <main>
+    <video id="video" controls preload="metadata" crossorigin="anonymous"></video>
+    <div class="overlay">
+      <span id="stat" class="pill">Initializing…</span>
+    </div>
+  </main>
+  <footer>
+    <div class="row">
+      <label>Max buffer (s)<input id="maxBufferLength" type="number" min="10" max="1200" step="5" value="120"></label>
+      <label>Max maxBuffer (s)<input id="maxMaxBufferLength" type="number" min="30" max="3600" step="10" value="360"></label>
+      <label>Live sync (segments)<input id="liveSyncDurationCount" type="number" min="2" max="10" step="1" value="3"></label>
+      <label><input id="enableWorker" type="checkbox" checked> Enable Worker</label>
+      <label><input id="autoLevel" type="checkbox" checked> Auto quality</label>
+    </div>
+    <div class="row">
+      Tip: append ?src=<encoded URL>&title=Name in the link. Works well in MSX and Lampa "player=" parameter.
+    </div>
+  </footer>
+</div>
+
+<!-- hls.js from CDN (fallback if blocked) -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"></script>
+<script>
+(function(){
+  const $ = (id)=>document.getElementById(id);
+  const video = $('video');
+  const srcInput = $('src');
+  const playBtn = $('play');
+  const stopBtn = $('stop');
+  const qualitySel = $('quality');
+  const audioSel = $('audio');
+  const subsSel = $('subs');
+  const stat = $('stat');
+
+  function getParam(name){
+    const u = new URL(window.location.href);
+    return u.searchParams.get(name);
+  }
+  function setStat(t){ stat.textContent = t; }
+
+  // Apply query params
+  const qsSrc = getParam('src');
+  const qsTitle = getParam('title');
+  if(qsTitle) document.title = qsTitle + ' · VIDAA 4K Player';
+  if(qsSrc){ srcInput.value = qsSrc; }
+
+  let hls = null;
+  let lastLevels = [];
+
+  function destroy(){
+    if(hls){ try{ hls.destroy(); }catch(e){} hls = null; }
+    try{ video.pause(); }catch(e){}
+    try{ video.removeAttribute('src'); video.load(); }catch(e){}
+    setStat('Stopped');
+    qualitySel.innerHTML = ''; audioSel.innerHTML=''; subsSel.innerHTML='';
+    lastLevels = [];
+  }
+
+  function playableType(url){
+    if(/\.m3u8(\?|$)/i.test(url)) return 'hls';
+    if(/\.mpd(\?|$)/i.test(url)) return 'dash';
+    if(/\.mp4(\?|$)/i.test(url)) return 'mp4';
+    return 'hls'; // assume HLS by default
+  }
+
+  function populateTracks(){
+    // Quality
+    qualitySel.innerHTML = '';
+    const autoOpt = document.createElement('option');
+    autoOpt.value = '-1'; autoOpt.textContent = 'Auto';
+    qualitySel.appendChild(autoOpt);
+
+    if(hls && hls.levels){
+      lastLevels = hls.levels.slice();
+      lastLevels.forEach((lvl, i)=>{
+        const opt = document.createElement('option');
+        const height = lvl.height || '?';
+        const bw = Math.round((lvl.bitrate||0)/1e6*10)/10;
+        opt.value = i;
+        opt.textContent = `${height}p • ${bw} Mbps`;
+        qualitySel.appendChild(opt);
+      });
+    }
+    // Audio tracks
+    audioSel.innerHTML='';
+    const adef = document.createElement('option'); adef.value='-1'; adef.textContent='Audio: Auto';
+    audioSel.appendChild(adef);
+    if(hls && hls.audioTracks){
+      hls.audioTracks.forEach((t,i)=>{
+        const opt=document.createElement('option');
+        opt.value=i; opt.textContent=`${t.name||t.lang||('Track '+i)}`;
+        audioSel.appendChild(opt);
+      });
+    }
+    // Subs
+    subsSel.innerHTML='';
+    const sdef=document.createElement('option'); sdef.value='-1'; sdef.textContent='Subtitles: Off';
+    subsSel.appendChild(sdef);
+    if(hls && hls.subtitleTracks){
+      hls.subtitleTracks.forEach((t,i)=>{
+        const opt=document.createElement('option');
+        opt.value=i; opt.textContent=`${t.name||t.lang||('Subs '+i)}`;
+        subsSel.appendChild(opt);
+      });
+    }
+  }
+
+  async function play(url){
+    destroy();
+    if(!url){ setStat('No URL'); return; }
+    const type = playableType(url);
+    const cfg = {
+      // 4K-friendly buffering
+      maxBufferLength: parseFloat($('maxBufferLength').value)||120,
+      maxMaxBufferLength: parseFloat($('maxMaxBufferLength').value)||360,
+      liveSyncDurationCount: parseInt($('liveSyncDurationCount').value)||3,
+      enableWorker: $('enableWorker').checked,
+      lowLatencyMode: false,
+      backBufferLength: 90,
+      // Some VIDAA builds are sensitive to nudge settings
+      nudgeMaxRetry: 3,
+      progressive: false
+    };
+
+    try{
+      if(type==='hls' && window.Hls && window.Hls.isSupported()){
+        hls = new Hls(cfg);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MEDIA_ATTACHED, ()=>{
+          setStat('Loading…');
+          hls.loadSource(url);
+        });
+        hls.on(Hls.Events.MANIFEST_PARSED, ()=>{
+          setStat('Manifest loaded');
+          populateTracks();
+          video.play().catch(()=>{});
+        });
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_, data)=>{
+          const lvl = lastLevels[data.level]||{};
+          setStat(`Quality: ${lvl.height||'?'}p`);
+        });
+        hls.on(Hls.Events.ERROR, (_, data)=>{
+          console.warn('hls.js error', data);
+          stat.textContent = 'Error: ' + data.type + ' / ' + data.details;
+        });
+      } else {
+        // Fallback: native (MP4 or native HLS if supported)
+        video.src = url;
+        await video.play();
+        setStat('Playing (native)');
+      }
+    }catch(e){
+      console.error(e);
+      setStat('Playback error: '+e.message);
+    }
+  }
+
+  playBtn.addEventListener('click', ()=> play(srcInput.value.trim()));
+  stopBtn.addEventListener('click', destroy);
+
+  qualitySel.addEventListener('change', ()=>{
+    if(!hls) return;
+    const v = parseInt(qualitySel.value);
+    if(v===-1){ hls.currentLevel = -1; } else { hls.currentLevel = v; }
+  });
+  audioSel.addEventListener('change', ()=>{
+    if(!hls) return;
+    const v = parseInt(audioSel.value);
+    if(v===-1){ return; }
+    hls.audioTrack = v;
+  });
+  subsSel.addEventListener('change', ()=>{
+    if(!hls) return;
+    const v = parseInt(subsSel.value);
+    if(v===-1){ hls.subtitleTrack = -1; } else { hls.subtitleTrack = v; }
+  });
+
+  // Autoplay if ?src=
+  if(srcInput.value){
+    setTimeout(()=> play(srcInput.value), 50);
+  } else {
+    setStat('Ready');
+  }
+})();
+</script>
+</body>
+</html>
